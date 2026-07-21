@@ -1389,17 +1389,6 @@ void ispblk_tnr_tun_cfg(
 	ISP_WR_BITS(manr, reg_isp_mmap_t, reg_f8, history_sel_1, cfg->history_sel_1);
 	ISP_WR_BITS(manr, reg_isp_mmap_t, reg_f8, history_sel_3, cfg->history_sel_3);
 
-	if (_is_all_online(ctx) && cfg->rgbmap_w_bit > 3) {
-		vi_pr(VI_WARN, "rgbmap_w_bit(%d) need <= 3 under on the fly mode\n", cfg->rgbmap_w_bit);
-		cfg->rgbmap_w_bit = cfg->rgbmap_h_bit = 3;
-	} else if (cfg->rgbmap_w_bit > 5) {
-		vi_pr(VI_WARN, "rgbmap_w_bit(%d) need <= 5\n", cfg->rgbmap_w_bit);
-		cfg->rgbmap_w_bit = cfg->rgbmap_h_bit = 5;
-	} else if (cfg->rgbmap_w_bit < 3) {
-		vi_pr(VI_WARN, "rgbmap_w_bit(%d) need >= 3\n", cfg->rgbmap_w_bit);
-		cfg->rgbmap_w_bit = cfg->rgbmap_h_bit = 3;
-	}
-
 	reg_8.raw = ISP_RD_REG(tnr, reg_isp_444_422_t, reg_8);
 	reg_8.bits.force_dma_disable = (cfg->manr_enable == ISP_TNR_TYPE_NEW_MODE) ? 0x0 :
 					((cfg->manr_enable == ISP_TNR_TYPE_OLD_MODE) ? 0x24 : 0x3f);
@@ -1442,6 +1431,17 @@ void ispblk_tnr_tun_cfg(
 	ISP_WR_REGS_BURST(manr, reg_isp_mmap_t, reg_100, cfg->tnr_7_cfg, cfg->tnr_7_cfg.reg_100);
 
 	ISP_WR_BITS(manr, reg_isp_mmap_t, reg_2c, mmap_0_mh_wgt, cfg->mh_wgt);
+
+	if (_is_all_online(ctx) && cfg->rgbmap_w_bit > 3) {
+		vi_pr(VI_WARN, "rgbmap_w_bit(%d) need <= 3 under on the fly mode\n", cfg->rgbmap_w_bit);
+		cfg->rgbmap_w_bit = cfg->rgbmap_h_bit = 3;
+	} else if (cfg->rgbmap_w_bit > 5) {
+		vi_pr(VI_WARN, "rgbmap_w_bit(%d) need <= 5\n", cfg->rgbmap_w_bit);
+		cfg->rgbmap_w_bit = cfg->rgbmap_h_bit = 5;
+	} else if (cfg->rgbmap_w_bit < 3) {
+		vi_pr(VI_WARN, "rgbmap_w_bit(%d) need >= 3\n", cfg->rgbmap_w_bit);
+		cfg->rgbmap_w_bit = cfg->rgbmap_h_bit = 3;
+	}
 
 	if (g_w_bit[raw_num] != cfg->rgbmap_w_bit) {
 		g_w_bit[raw_num] = cfg->rgbmap_w_bit;

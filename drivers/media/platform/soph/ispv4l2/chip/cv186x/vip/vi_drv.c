@@ -2789,6 +2789,20 @@ void ispblk_pre_be_cfg_update(struct isp_ctx *ctx, const enum sop_isp_raw raw_nu
 	ISP_WR_BITS(sts, reg_isp_af_t, mxn_image_width_m1, af_mxn_image_height, ctx->img_height - 1);
 }
 
+void ispblk_pre_fe_cfg_update(struct isp_ctx *ctx, const enum sop_isp_raw raw_num)
+{
+	int id = fe_find_hwid(raw_num);
+	uintptr_t preraw_fe = ctx->phys_regs[id];
+	union reg_pre_raw_fe_pre_raw_ctrl raw_ctrl;
+
+	raw_ctrl.raw = ISP_RD_REG(preraw_fe, reg_pre_raw_fe_t, pre_raw_ctrl);
+	raw_ctrl.bits.bayer_type_le = ctx->rgb_color_mode[raw_num];
+	raw_ctrl.bits.bayer_type_se = ctx->rgb_color_mode[raw_num];
+	raw_ctrl.bits.post_blc_bayer_type_le = bayer_type_mapping(ctx->rgb_color_mode[raw_num]);
+	raw_ctrl.bits.post_blc_bayer_type_se = bayer_type_mapping(ctx->rgb_color_mode[raw_num]);
+	ISP_WR_REG(preraw_fe, reg_pre_raw_fe_t, pre_raw_ctrl, raw_ctrl.raw);
+}
+
 int isp_frm_err_handler(struct isp_ctx *ctx, const enum sop_isp_raw err_raw_num, const u8 step)
 {
 	uintptr_t isptopb = ctx->phys_regs[ISP_BLK_ID_ISPTOP];

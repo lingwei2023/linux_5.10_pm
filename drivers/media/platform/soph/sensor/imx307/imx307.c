@@ -38,7 +38,7 @@
 #define IMX307_CHIP_ID_MASK		0x6
 
 /*Sensor type for isp middleware*/
-#define IMX307_SNS_TYPE_SDR V4L2_SONY_IMX307_2L_MIPI_2M_30FPS_12BIT
+#define IMX307_SNS_TYPE_SDR V4L2_SONY_IMX307_4L_MIPI_2M_60FPS_12BIT
 #define IMX307_SNS_TYPE_WDR V4L2_SONY_IMX307_2L_MIPI_2M_30FPS_12BIT_WDR2TO1
 
 static const enum mipi_wdr_mode_e imx307_wdr_mode = MIPI_WDR_MODE_DOL;
@@ -49,7 +49,7 @@ module_param_array(force_bus, int, &imx307_count, 0644);
 
 static int imx307_probe_index;
 static const unsigned short imx307_i2c_list[] = {0x1a};
-static const int imx307_bus_map[MAX_SENSOR_DEVICE] = {0, 1, 2, 4, 5, 6};
+static const int imx307_bus_map[MAX_SENSOR_DEVICE] = {3, -1, -1, -1, -1, -1};
 
 struct imx307_reg_list {
 	u32 num_of_regs;
@@ -81,19 +81,19 @@ static struct imx307_mode supported_modes[] = {
 		.max_height = 1097,
 		.width = 1920,
 		.height = 1080,
-		.exp_def = 0x00,
-		.hts_def = 1484,
-		.vts_def = 2432,
+		.exp_def = 0x2000,
+		.hts_def = 0x1130,
+		.vts_def = 1125,
 		.mipi_wdr_mode = MIPI_WDR_MODE_NONE,
-		.sns_type = V4L2_SONY_IMX307_2L_MIPI_2M_30FPS_12BIT,
-		.sns_type_name  = "V4L2_SONY_IMX307_2L_MIPI_2M_30FPS_12BIT",
+		.sns_type = V4L2_SONY_IMX307_4L_MIPI_2M_60FPS_12BIT,
+		.sns_type_name  = "V4L2_SONY_IMX307_4L_MIPI_2M_60FPS_12BIT",
 		.max_fps = {
 			.numerator = 10000,
-			.denominator = 300000,
+			.denominator = 600000,
 		},
 		.reg_list = {
-			.num_of_regs = ARRAY_SIZE(mode_linear_1920x1080_12bit_regs),
-			.regs = mode_linear_1920x1080_12bit_regs,
+			.num_of_regs = ARRAY_SIZE(mode_linear_1920x1080p60_12bit_regs),
+			.regs = mode_linear_1920x1080p60_12bit_regs,
 		},
 	},
 	{

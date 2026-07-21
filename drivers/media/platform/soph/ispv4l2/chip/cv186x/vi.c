@@ -47,6 +47,10 @@
 #define VI_MAX_LIST_NUM		(0x80)
 #define VI_CMDQ_BUF_SIZE	(0x20000)
 #define VI_DDR_RETRAIN_REG	(0x281000f4)
+#define VI_GP_RETRAIN_REG	(0x281000f8)
+#define DDR_RETRAIN_GP_TRIGGER_BIT   BIT(16)
+#define DDR_RETRAIN_REG_MODE_MASK    (0xFU)
+#define DDR_RETRAIN_SAFETY_MARGIN_US (150)
 #define VIP_ALIGNMENT 0x40
 
 /* In practical application, it is necessary to drop the frame of AE convergence process.
@@ -676,8 +680,8 @@ int vi_get_pipe_frame(struct sop_vi_dev *videv, int vi_pipe,
 	raw_num = vi_get_raw_num_by_dev(ctx, vi_pipe);
 	dump[0].raw_dump.raw_num = raw_num;
 
-	dev_frm_w = ctx->isp_pipe_cfg[raw_num].crop.w;
-	dev_frm_h = ctx->isp_pipe_cfg[raw_num].crop.h;
+	dev_frm_w = g_vi_ctx->dev_attr[vi_pipe].size.width;
+	dev_frm_h = g_vi_ctx->dev_attr[vi_pipe].size.height;
 
 	memset(&rawdump_crop, 0, sizeof(rawdump_crop));
 	if ((frame_info[0].video_frame.offset_top != 0) ||
@@ -730,7 +734,7 @@ int vi_get_pipe_frame(struct sop_vi_dev *videv, int vi_pipe,
 	ret = isp_raw_dump(videv, &dump[0]);
 	if (ret != 0) {
 		vi_pr(VI_ERR, "_isp_raw_dump fail\n");
-		return -1;
+		goto free_dma;
 	}
 
 	if (dump[0].is_timeout) {
@@ -925,15 +929,88 @@ static int64_t _mempool_pop(u32 size)
 	return addr;
 }
 
+static void update_record_info(struct sop_vi_dev *vdev, enum sop_isp_raw raw_num, bool is_sof)
+{
+	struct record_info *record_info = &vdev->retrain.record_info[raw_num];
+	struct timespec64 cur_ts64 = ktime_to_timespec64(ktime_get());
+	u64 ts = timespec64_to_ns(&cur_ts64) / 1000;
+
+	if (is_sof) {
+		record_info->period_ts = ts - record_info->last_sof_ts;
+		record_info->last_sof_ts = ts;
+		record_info->next_sof_ts = ts + record_info->period_ts;
+		return;
+	}
+
+	//means eof
+	record_info->last_eof_ts = ts;
+	vdev->retrain.max_cur_eof = ts;
+
+	vi_pr(VI_DBG, "raw_num(%d), last_sof(%lld), last_eof_ts(%lld), unblanking(%lld) next_sof(%lld), blanking(%lld)",
+			raw_num, record_info->last_sof_ts, record_info->last_eof_ts,
+			record_info->last_eof_ts - record_info->last_sof_ts, record_info->next_sof_ts,
+			record_info->next_sof_ts - record_info->last_eof_ts);
+}
+
 static bool ddr_need_retrain(struct sop_vi_dev *vdev)
 {
-	if (ioread32(vdev->ddr_retrain_reg) & BIT(8)) {
+	struct ddr_retrain *retrain = &vdev->retrain;
+
+	if (ioread32(retrain->ddr_reg) & 0xF) {
 		return true;
 	}
 
 	return false;
 }
 
+static void ddr_try_retrain(struct sop_vi_dev *vdev)
+{
+	enum sop_isp_raw raw_num;
+	struct record_info *rec = NULL;
+	struct ddr_retrain *retrain = &vdev->retrain;
+	// struct vo_retrain_info vo_info = {0};
+	struct timespec64 cur_ts64 = ktime_to_timespec64(ktime_get());
+	u64 cur_ts = timespec64_to_ns(&cur_ts64) / NSEC_PER_USEC;
+	u64 min_sof_ts = __UINT64_MAX__;
+	// int rc = 0;
+	bool is_blanking = false;
+
+	for (raw_num = ISP_PRERAW0; raw_num < ISP_PRERAW_MAX; raw_num++) {
+		if (!vdev->ctx.isp_pipe_enable[raw_num])
+			continue;
+
+		rec = &retrain->record_info[raw_num];
+		//means not in blanking
+		if (rec->last_eof_ts < rec->last_sof_ts)
+			return;
+
+		min_sof_ts = min(min_sof_ts, rec->next_sof_ts);
+	}
+
+	retrain->min_next_sof = min_sof_ts;
+
+	// rc = _vi_call_cb(E_MODULE_VO, VO_CB_GET_RETRAIN_INFO, &vo_info);
+	// if (rc) {
+	// 	vi_pr(VI_INFO, "fail to cb VO_CB_GET_RETRAIN_INFO, rc(%d)", rc);
+	// }
+
+	// if (vo_info.is_vo_en && (cur_ts >= vo_info.frame_end + vo_info.margin)) {
+	// 	vi_pr(VI_DBG, "cur_ts(%lld), frame_end(%lld), margin(%lld)",
+	// 			cur_ts, vo_info.frame_end, vo_info.margin);
+	// 	return;
+	// }
+
+	is_blanking = cur_ts > retrain->max_cur_eof &&
+			cur_ts < (min_sof_ts - DDR_RETRAIN_SAFETY_MARGIN_US);
+	if (is_blanking) {
+		iowrite32(ioread32(retrain->gp_reg) | DDR_RETRAIN_GP_TRIGGER_BIT, retrain->gp_reg);
+		iowrite32(ioread32(retrain->ddr_reg) & ~DDR_RETRAIN_REG_MODE_MASK, retrain->ddr_reg);
+		vi_pr(VI_INFO, "ddr_retrain cur_ts(%lld), max_cur_eof(%lld), min_nex_sof(%lld)",
+				cur_ts, retrain->max_cur_eof, retrain->min_next_sof);
+	}
+}
+
+#if 0
 static void trig_8051_if_pre_idle(struct sop_vi_dev *vdev)
 {
 	enum sop_isp_fe_chn_num fe_chn;
@@ -965,7 +1042,7 @@ static void trig_8051_if_pre_idle(struct sop_vi_dev *vdev)
 
 	vi_pr(VI_WARN, "call ddr retrain now 0x%x\n", ioread32(vdev->ddr_retrain_reg));
 }
-
+#endif
 /**
  * try to trigger preraw and linespliter after postraw done or drop frame done
  */
@@ -2947,14 +3024,21 @@ static void _isp_yuvtop_init(struct sop_vi_dev *vdev)
 
 static u32 _is_drop_next_frame(
 	struct sop_vi_dev *vdev,
-	const enum sop_isp_raw raw_num,
+	const enum sop_isp_raw hw_raw_num,
 	const enum sop_isp_fe_chn_num chn_num)
 {
 	struct isp_ctx *ctx = &vdev->ctx;
-	u32 start_drop_num = ctx->isp_pipe_cfg[raw_num].drop_ref_frm_num;
-	u32 end_drop_num = start_drop_num + ctx->isp_pipe_cfg[raw_num].drop_frm_cnt;
+	enum sop_isp_raw raw_num = hw_raw_num;
+	u32 start_drop_num = 0;
+	u32 end_drop_num = 0;
 	u32 frm_num = 0;
 	u8 dev_num = 0;
+
+	if (_is_right_tile(ctx, raw_num))
+		raw_num = ISP_PRERAW0;
+
+	start_drop_num = ctx->isp_pipe_cfg[raw_num].drop_ref_frm_num;
+	end_drop_num = start_drop_num + ctx->isp_pipe_cfg[raw_num].drop_frm_cnt;
 
 	if (ctx->isp_pipe_cfg[raw_num].is_drop_next_frame) {
 		//for tuning_dis, shoudn't trigger preraw;
@@ -2972,7 +3056,7 @@ static u32 _is_drop_next_frame(
 		if ((start_drop_num != 0) && (frm_num >= start_drop_num) && (frm_num < end_drop_num))
 			return 1;
 
-		if (ddr_need_retrain(vdev))
+		if (ddr_need_retrain(vdev) && ctx->isp_pipe_cfg[raw_num].is_tile)
 			return 1;
 	}
 
@@ -5286,9 +5370,7 @@ s8 _pre_hw_enque(
 	}
 
 	if (ddr_need_retrain(vdev)) {
-		ctx->isp_pipe_cfg[raw_num].is_drop_next_frame = true;
-		trig_8051_if_pre_idle(vdev);
-		return -ISP_DROP_FRM;
+		ddr_try_retrain(vdev);
 	}
 
 #ifdef PORTING_TEST //test only
@@ -5304,7 +5386,7 @@ s8 _pre_hw_enque(
 		if (_is_drop_next_frame(vdev, raw_num, chn_num)) {
 			vi_pr(VI_DBG, "Pre_fe_%d chn_num_%d drop_frame_num %d\n",
 					raw_num, chn_num, vdev->drop_frame_number[raw_num]);
-			return -ISP_DROP_FRM;
+			return ISP_SUCCESS;
 		}
 
 		if (_is_fe_be_online(ctx) && !ctx->is_slice_buf_on) { //fe->be->dram->post
@@ -6231,9 +6313,6 @@ static void _splt_hw_enque(struct sop_vi_dev *vdev, const enum sop_isp_raw hw_ra
 	u32 splt_fe1_w;
 	enum sop_isp_fe_chn_num chn_num, chn_max;
 	enum sop_isp_raw raw_num = hw_raw_num;
-	enum isp_blk_id_t blk_id = (raw_num == ISP_PRERAW0)
-					? ISP_BLK_ID_SPLT_FE0_WDMA
-					: ISP_BLK_ID_SPLT_FE1_WDMA;
 
 	if (atomic_read(&vdev->isp_streamoff) == 1) {
 		vi_pr(VI_DBG, "stop streaming\n");
@@ -6247,11 +6326,7 @@ static void _splt_hw_enque(struct sop_vi_dev *vdev, const enum sop_isp_raw hw_ra
 
 	/*disable wdma whnen ai isp ddr retrain */
 	if (ddr_need_retrain(vdev)) {
-		ctx->isp_pipe_cfg[raw_num].is_drop_next_frame = true;
-		if (ctx->isp_pipe_cfg[raw_num].raw_ai_isp_ap == RAW_AI_ISP_SPLT)
-			ispblk_splt_wdma_ctrl_config(ctx, blk_id, false);
-		trig_8051_if_pre_idle(vdev);
-		vi_pr(VI_DBG, "ddr need retrain\n");
+		ddr_try_retrain(vdev);
 	}
 
 	if (_is_right_tile(ctx, raw_num))
@@ -7428,7 +7503,7 @@ static int _vi_event_handler_thread(void *arg)
 #ifdef FPGA_PORTING
 	u32 timeout = 100000;//ms
 #else
-	u32 timeout = 2000;//ms
+	//u32 timeout = 2000;//ms
 #endif
 	int ret = 0;
 	int *th_id = (int *)arg;
@@ -7441,9 +7516,8 @@ static int _vi_event_handler_thread(void *arg)
 			do_exit(1);
 		}
 
-		ret = wait_event_timeout(vdev->vi_event_th[chn_num].wq,
-					 vdev->vi_event_th[chn_num].flag != 0 || kthread_should_stop(),
-					 msecs_to_jiffies(timeout) - 1);
+		ret = wait_event_interruptible(vdev->vi_event_th[chn_num].wq,
+					 vdev->vi_event_th[chn_num].flag != 0 || kthread_should_stop());
 
 		if (vdev->vi_event_th[chn_num].flag != 0)
 			vdev->vi_event_th[chn_num].flag = 0;
@@ -7456,17 +7530,23 @@ static int _vi_event_handler_thread(void *arg)
 		}
 
 		if (!ret) {
-			vi_pr(VI_INFO, "raw_%d vi_event_handler timeout(%d)ms\n", chn_num, timeout);
+			vi_pr(VI_DBG, "raw_%d vi_event_handler trig\n", chn_num);
+		} else {
+			vi_pr(VI_ERR, "raw_%d vi_event_handler interruptible by signal\n", chn_num);
 			if (++g_vi_ctx->timeout_cnt >= 2) {
 				atomic_set(&vdev->isp_dbg_flag, 1);
 				wake_up(&vdev->isp_dbg_wait_q);
 				g_vi_ctx->timeout_cnt = 0;
 			}
 
-			if (vdev->ctx.isp_pipe_cfg[raw_num].yuv_scene_mode == ISP_YUV_SCENE_BYPASS
-				&& vdev->postraw_frame_number[chn_num] > 10) {
-				vi_err_wake_up_th(vdev, raw_num);
+			if (vdev->ctx.isp_pipe_cfg[raw_num].is_yuv_sensor) {
+				if (vdev->ctx.isp_pipe_cfg[raw_num].yuv_scene_mode == ISP_YUV_SCENE_BYPASS
+					&& vdev->postraw_frame_number[chn_num] > 10) {
+					vi_err_wake_up_th(vdev, raw_num);
+				}
 			}
+
+			return -ERESTARTSYS;
 		}
 	}
 	return 0;
@@ -7691,6 +7771,26 @@ void isp_post_tasklet(unsigned long data)
 	_post_hw_enque(vdev);
 }
 
+static void _vi_color_mode_update(struct sop_vi_dev *vdev, enum sop_isp_raw raw_num)
+{
+	struct isp_ctx *ctx = &vdev->ctx;
+
+	if (ctx->rgb_color_mode[raw_num] !=
+		(enum isp_bayer_type_e)g_vi_ctx->dev_attr[raw_num].bayer_format) {
+		ctx->rgb_color_mode[raw_num] =
+			(enum isp_bayer_type_e)g_vi_ctx->dev_attr[raw_num].bayer_format;
+
+		// pre_be and post is auto update in post_hw_enque
+		// need to update pre_be now
+		ispblk_pre_fe_cfg_update(ctx, raw_num);
+
+		if (ctx->isp_pipe_cfg[raw_num].is_tile) {
+			ctx->rgb_color_mode[raw_num + 1] = ctx->rgb_color_mode[raw_num];
+			ispblk_pre_fe_cfg_update(ctx, raw_num + 1);
+		}
+	}
+}
+
 static int _vi_preraw_thread(void *arg)
 {
 	struct sop_vi_dev *vdev = (struct sop_vi_dev *)arg;
@@ -7769,15 +7869,14 @@ static int _vi_preraw_thread(void *arg)
 				//if !is_drop_next_frame, set is_drop_next_frame flags false;
 				if (_is_drop_next_frame(vdev, raw_num, ISP_FE_CH0)) {
 					++vdev->drop_frame_number[raw_num];
-				}
-
-				else {
+				} else {
 					vi_pr(VI_DBG, "raw_%d stop drop\n", raw_num);
 					/*
 					ctx->isp_pipe_cfg[raw_num].isp_reset_frm =
 						vdev->pre_fe_frm_num[raw_num][ISP_FE_CH0] + 1;
 					*/
 					_clear_drop_frm_info(vdev, raw_num);
+					_vi_color_mode_update(vdev, raw_num);
 				}
 
 				//vi onthefly and vpss online will trigger preraw in post_hw_enque
@@ -7917,13 +8016,15 @@ static void _isp_sof_handler(struct sop_vi_dev *vdev, const enum sop_isp_raw raw
 	if (atomic_read(&vdev->isp_streamoff) == 1)
 		return;
 
+	update_record_info(vdev, raw_num, true);
+
 	if (_is_right_tile(ctx, raw_num))
 		return;
 
 	if (!(_is_fe_be_online(ctx) && ctx->is_slice_buf_on) || ctx->isp_pipe_cfg[raw_num].is_drop_next_frame)
 		_vi_wake_up_preraw_th(vdev, raw_num);
 
-	vi_pr(VI_DBG, "raw_%d sof_cnt_%d\n", raw_num, vdev->pre_fe_sof_cnt[raw_num][ISP_FE_CH0]);
+	// vi_pr(VI_DBG, "raw_%d sof_cnt_%d\n", raw_num, vdev->pre_fe_sof_cnt[raw_num][ISP_FE_CH0]);
 
 	if (atomic_read(&vdev->isp_raw_dump_en[raw_num]) == 2) //raw_dump flow
 		atomic_set(&vdev->isp_raw_dump_en[raw_num], 3);
@@ -8042,6 +8143,8 @@ static inline void _isp_pre_fe_done_handler(
 	if (unlikely(atomic_read(&vdev->isp_err_times[raw_num]))) {
 		atomic_set(&vdev->isp_err_times[raw_num], 0);
 	}
+
+	update_record_info(vdev, raw_num, false);
 
 	vi_pr(VI_DBG, "dev_%d is_yuv[%d], pre_fe_%d chn_num=%d frm_num=%d\n",
 	      buf_chn, ctx->isp_pipe_cfg[raw_num].is_yuv_sensor,
@@ -8690,6 +8793,7 @@ static void _isp_pre_fe_frame_start_chk(
 			vi_record_sof_perf(vdev, raw_num, ISP_FE_CH0);
 			if (!vdev->ctx.isp_pipe_cfg[raw_num].is_raw_replay_be) {//RGB sensor
 				++vdev->pre_fe_sof_cnt[raw_num][ISP_FE_CH0];
+				vi_pr(VI_DBG, "raw_%d sof_cnt_%d\n", raw_num, vdev->pre_fe_sof_cnt[raw_num][ISP_FE_CH0]);
 				_isp_sof_handler(vdev, raw_num);
 			}
 		}
@@ -8890,6 +8994,55 @@ static void subcall_s_sensor_hdr(struct sop_vi_dev *vdev, u8 chn_id, int on)
 	}
 
 	v4l2_subdev_call(sensor_sd, core, ioctl, SNS_V4L2_SET_HDR_ON, &hdr_on);
+}
+
+static void subcall_s_sensor_mirror_flip(struct sop_vi_dev *vdev, u8 raw_num, int mirror_flip)
+{
+	struct sop_isp_device *dev =
+		container_of(vdev, struct sop_isp_device, vi_dev);
+	struct v4l2_subdev *sensor_sd = dev->sensors[raw_num].sd;
+	struct isp_i2c_data i2c_data = {.drop_frame_cnt = 1};
+	int mirror_flip_flag = mirror_flip;
+	int ret = -EINVAL;
+
+	if (!sensor_sd) {
+		vi_pr(VI_INFO, "sensor subdev is NULL!\n");
+		return;
+	}
+
+	ret = v4l2_subdev_call(sensor_sd, core, ioctl, SNS_V4L2_SET_MIRROR_FLIP, &mirror_flip_flag);
+	if (ret < 0) {
+		vi_pr(VI_INFO, "sensor[%d] subcall fail %d!\n", raw_num, ret);
+		return;
+	}
+
+	_set_drop_frm_info(vdev, raw_num, &i2c_data);
+}
+
+static void subcall_g_sensor_bayer_format(struct sop_vi_dev *vdev, u8 raw_num)
+{
+	struct sop_isp_device *dev =
+		container_of(vdev, struct sop_isp_device, vi_dev);
+	struct v4l2_subdev *sensor_sd = dev->sensors[raw_num].sd;
+	int bayer_format = -1;
+	int ret = -EINVAL;
+
+	if (!sensor_sd) {
+		vi_pr(VI_INFO, "sensor subdev is NULL!\n");
+		return;
+	}
+
+	ret = v4l2_subdev_call(sensor_sd, core, ioctl, SNS_V4L2_GET_BAYER_FORMAT, &bayer_format);
+	if (ret < 0) {
+		vi_pr(VI_INFO, "sensor[%d] subcall fail %d!\n", raw_num, ret);
+		return;
+	}
+
+	if (bayer_format != -1) {
+		vi_pr(VI_INFO, "bayer format: %d\n", bayer_format);
+		g_vi_ctx->dev_attr[raw_num].bayer_format = bayer_format;
+		_vi_color_mode_update(vdev, raw_num);
+	}
 }
 
 static int subcall_get_sensor_mode(struct sop_vi_dev *vdev, u8 raw_num)
@@ -9773,6 +9926,18 @@ static int sop_isp_g_ext_ctrls(
 			break;
 		}
 
+		case VI_IOCTL_GET_SNS_BAYER_FORMAT:
+		{
+			subcall_g_sensor_bayer_format(vdev, raw_num);
+
+			if (copy_to_user(p->ptr, &ctx->rgb_color_mode[raw_num], sizeof(int)) != 0) {
+				vi_pr(VI_ERR, "rgb_color_mode copy to user fail.\n");
+				break;
+			}
+			rc = 0;
+			break;
+		}
+
 		default:
 			vi_pr(VI_INFO, "unsupport ext ctrl cmd!\n");
 			break;
@@ -9998,9 +10163,9 @@ static int sop_isp_s_ext_ctrls(
 
 		case VI_IOCTL_SET_BYPASS_FRM:
 		{
-			g_vi_ctx->bypass_frm[raw_num] =  p->value;
-			vi_pr(VI_INFO, "dev_%d set pipe_%d bypass_frm(%d)\n",
-			      chn_id, raw_num, p->value);
+			// g_vi_ctx->bypass_frm[raw_num] =  p->value;
+			// vi_pr(VI_INFO, "dev_%d set pipe_%d bypass_frm(%d)\n",
+			//       chn_id, raw_num, p->value);
 			rc = 0;
 			break;
 		}
@@ -10187,6 +10352,14 @@ static int sop_isp_s_ext_ctrls(
 		{
 			vdev->ctx.dev_num = p->value;
 			vi_pr(VI_INFO, "set dev num = %d\n", p->value);
+			rc = 0;
+			break;
+		}
+
+		case VI_IOCTL_SET_SNS_MIRROR_FLIP:
+		{
+			vi_pr(VI_INFO, "set raw_%d mirror_flip(%d)\n", raw_num, p->value);
+			subcall_s_sensor_mirror_flip(vdev, chn_id, p->value);
 			rc = 0;
 			break;
 		}
@@ -10767,14 +10940,16 @@ int sop_isp_dqbuf(struct file *file, void *priv, struct v4l2_buffer *p)
 	spin_unlock_irqrestore(&videv->qbuf_lock[raw_num], flags);
 
 	if (!rdy_to_dq) {
-		ret = wait_event_timeout(videv->isp_dq_wait_q[raw_num],
-					 atomic_read(&videv->post_dq_flag[raw_num]) == 0,
-					 msecs_to_jiffies(timeout));
+		ret = wait_event_interruptible(videv->isp_dq_wait_q[raw_num],
+					 atomic_read(&videv->post_dq_flag[raw_num]) == 0);
 
 		if (!ret) {
-			vi_pr(VI_ERR, "dev_%d dqbuf[%d] timeout(%d ms)\n",
-			      chn_id, cur_frm, timeout);
-			return -ETIME;
+			vi_pr(VI_DBG, "dev_%d dqbuf[%d] success\n",
+			      chn_id, cur_frm);
+		} else {
+			vi_pr(VI_ERR, "dev_%d dqbuf[%d] interruptible by signal\n",
+			      chn_id, cur_frm);
+			return -ERESTARTSYS;
 		}
 	} else {
 		vi_pr(VI_DBG, "dev_%d dqbuf_list is ready, no need wait\n", chn_id);
@@ -11473,10 +11648,14 @@ int vi_core_init(struct platform_device *pdev)
 	}
 
 	// init device dma mask
-	dma_set_mask_and_coherent(videv->dev, DMA_BIT_MASK(64));
+	videv->retrain.gp_reg = ioremap(VI_GP_RETRAIN_REG, 0x4);
+	if (!videv->retrain.gp_reg) {
+		vi_pr(VI_ERR, "Failed to ioremap gp_retrain_reg\n");
+		goto err;
+	}
 
-	videv->ddr_retrain_reg = ioremap(VI_DDR_RETRAIN_REG, 0x4);
-	if (!videv->ddr_retrain_reg) {
+	videv->retrain.ddr_reg = ioremap(VI_DDR_RETRAIN_REG, 0x4);
+	if (!videv->retrain.ddr_reg) {
 		vi_pr(VI_ERR, "Failed to ioremap ddr_retrain_reg\n");
 		goto err;
 	}
@@ -11509,7 +11688,8 @@ int vi_core_deinit(struct sop_vi_dev *videv)
 
 	tasklet_kill(&videv->job_work);
 
-	iounmap(videv->ddr_retrain_reg);
+	iounmap(videv->retrain.gp_reg);
+	iounmap(videv->retrain.ddr_reg);
 
 	vi_pr(VI_INFO, "-\n");
 

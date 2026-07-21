@@ -24,6 +24,7 @@
 #include <linux/gpio/consumer.h>
 
 #include <linux/comm_cif.h>
+#include <linux/comm_video.h>
 #include <linux/sns_v4l2_uapi.h>
 
 #include "ar2020.h"
@@ -35,7 +36,9 @@
 /* Chip ID */
 #define AR2020_CHIP_ID_ADDR_L		0x3107
 #define AR2020_CHIP_ID_ADDR_H		0x3108
-#define AR2020_CHIP_ID				0x9c42
+#define AR2020_CHIP_ID			0x9c42
+
+#define AR2020_MIRROR_FLIP		0x0101
 
 /*Sensor type for isp middleware*/
 #define AR2020_SNS_TYPE_SDR V4L2_ONSEMI_AR2020_20M_25FPS_10BIT
@@ -49,7 +52,7 @@ module_param_array(force_bus, int, &ar2020_count, 0644);
 
 static int ar2020_probe_index;
 static const unsigned short ar2020_i2c_list[] = {0x36};
-static int ar2020_bus_map[MAX_SENSOR_DEVICE] = {1, -1, -1, -1, -1, -1};
+static int ar2020_bus_map[MAX_SENSOR_DEVICE] = {3, -1, -1, -1, -1, -1};
 
 struct ar2020_reg_list {
 	u32 num_of_regs;
@@ -84,11 +87,11 @@ static struct ar2020_mode supported_modes[] = {
 		.sns_type_name  = "V4L2_ONSEMI_AR2020_20M_25FPS_10BIT",
 		.max_fps = {
 			.numerator = 10000,
-			.denominator = 250000,
+			.denominator = 200000,
 		},
 		.reg_list = {
-			.num_of_regs = ARRAY_SIZE(mode_5120x3840_regs),
-			.regs = mode_5120x3840_regs,
+			.num_of_regs = ARRAY_SIZE(mode_5120x3840_edr_slave_regs),
+			.regs = mode_5120x3840_edr_slave_regs,
 		},
 	}
 };
@@ -194,14 +197,25 @@ static int ar2020_write_regs(struct ar2020 *ar2020,
 	u32 i;
 
 	for (i = 0; i < len; i++) {
-		ret = ar2020_write_reg(ar2020, regs[i].address, REG_VALUE_16BIT,
+		if (regs[i].address == 0xFFFF) {
+			// 延时 x 微秒
+			dev_info(&client->dev, "sensor delay %d us\n", (int)regs[i].val);
+			usleep_range((int)regs[i].val, (int)regs[i].val);
+			continue;
+		}
+
+		if (regs[i].flag == 1)
+			ret = ar2020_write_reg(ar2020, regs[i].address, REG_VALUE_08BIT,
+					regs[i].val);
+		else
+			ret = ar2020_write_reg(ar2020, regs[i].address, REG_VALUE_16BIT,
 					regs[i].val);
 		if (ret) {
-			dev_err_ratelimited(&client->dev, "Failed to write reg 0x%4.4x. error=%d\n",
+			dev_err(&client->dev, "Failed to write reg 0x%4.4x. error=%d\n",
 					    regs[i].address, ret);
 
 			return ret;
-		}
+		} 
 	}
 
 	return 0;
@@ -682,7 +696,72 @@ static int ar2020_get_info_form_dts(struct ar2020 *ar2020, int index_id)
 
 	return 0;
 }
+static void ar2020_mirror_flip(struct ar2020 *ar2020, int orient)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&ar2020->sd);
+	int Filp = 0, Mirror = 0, ret = 0;
 
+	pr_info("set mirror_flip:%d", orient);
+
+	switch (orient) {
+	case 0:
+		break;
+	case 1:
+		Mirror = 1;
+		break;
+	case 2:
+		Filp = 1;
+		break;
+	case 3:
+		Mirror = 1;
+		Filp   = 1;
+		break;
+	default:
+		return;
+	}
+
+	ret = ar2020_write_reg(ar2020, AR2020_MIRROR_FLIP, REG_VALUE_08BIT,
+				Filp << 1 | Mirror);
+	if (ret) {
+		dev_err(&client->dev, "Failed to write reg 0x%x error=%d\n",
+				AR2020_MIRROR_FLIP, ret);
+		return;
+	}
+}
+
+static void ar2020_get_bayer_format(struct ar2020 *ar2020, int *bayer_format)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&ar2020->sd);
+	int ret = 0;
+	int mirror_flip = -1;
+
+	ret = ar2020_read_reg(ar2020, AR2020_MIRROR_FLIP, REG_VALUE_08BIT,
+				&mirror_flip);
+	if (ret) {
+		dev_err(&client->dev, "Failed to read reg 0x%x error=%d\n",
+				AR2020_MIRROR_FLIP, ret);
+		return;
+	}
+
+	pr_info("get mirror_flip:%d", mirror_flip);
+
+	switch (mirror_flip) {
+	case 0: //GRBG
+		*bayer_format = BAYER_FORMAT_GR;
+		break;
+	case 1: //RGGB
+		*bayer_format = BAYER_FORMAT_RG;
+		break;
+	case 2: //BGGR
+		*bayer_format = BAYER_FORMAT_BG;
+		break;
+	case 3: //GBRG
+		*bayer_format = BAYER_FORMAT_GB;
+		break;
+	default:
+		return;
+	}
+}
 static long ar2020_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 {
 	struct ar2020 *ar2020 = to_ar2020(sd);
@@ -700,6 +779,24 @@ static long ar2020_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 		}
 
 		memcpy(arg, &type, sizeof(int));
+		break;
+	}
+
+	case SNS_V4L2_SET_MIRROR_FLIP:
+	{
+		int orient = 0;
+
+		memcpy(&orient, arg, sizeof(int));
+		ar2020_mirror_flip(ar2020, orient);
+		break;
+	}
+
+	case SNS_V4L2_GET_BAYER_FORMAT:
+	{
+		int bayer_format = -1;
+
+		ar2020_get_bayer_format(ar2020, &bayer_format);
+		memcpy(arg, &bayer_format, sizeof(int));
 		break;
 	}
 
@@ -1047,7 +1144,8 @@ static struct i2c_driver ar2020_i2c_driver = {
 
 static int __init sensor_mod_init(void)
 {
-	pr_info("== ar2020 mod add ==\n");
+	const char *driver_version = "v1.0.2";
+	pr_info("== [%s] ar2020 mod add  ==\n", driver_version);
 
 	return i2c_add_driver(&ar2020_i2c_driver);
 }

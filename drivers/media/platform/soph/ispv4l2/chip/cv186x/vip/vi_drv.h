@@ -904,6 +904,7 @@ void isp_first_frm_reset(struct isp_ctx *ctx, u8 reset);
 void ispblk_post_yuv_cfg_update(struct isp_ctx *ctx, const enum sop_isp_raw raw_num);
 void ispblk_post_cfg_update(struct isp_ctx *ctx, const enum sop_isp_raw raw_num);
 void ispblk_pre_be_cfg_update(struct isp_ctx *ctx, const enum sop_isp_raw raw_num);
+void ispblk_pre_fe_cfg_update(struct isp_ctx *ctx, const enum sop_isp_raw raw_num);
 int ispblk_dma_get_size(struct isp_ctx *ctx, int dmaid, u32 _w, u32 _h);
 struct _csibdg_dbg_i ispblk_csibdg_chn_dbg(
 	struct isp_ctx *ctx,
