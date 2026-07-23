@@ -38,7 +38,7 @@
 #define SC233HGS_CHIP_ID			0xcb61
 
 /*Sensor type for isp middleware*/
-#define SC233HGS_SNS_TYPE_SDR V4L2_SMS_SC233HGS_MIPI_2M_60FPS_10BIT
+#define SC233HGS_SNS_TYPE_SDR V4L2_SMS_SC233HGS_MASTER_MIPI_2M_30FPS_4lane_10BIT
 #define SC233HGS_SNS_TYPE_WDR V4L2_SMS_SC233HGS_MIPI_2M_60FPS_10BIT_WDR2TO1
 
 static const enum mipi_wdr_mode_e sc233hgs_wdr_mode = MIPI_WDR_MODE_VC;
@@ -48,8 +48,8 @@ static int force_bus[MAX_SENSOR_DEVICE] = {[0 ... (MAX_SENSOR_DEVICE - 1)] = -1}
 module_param_array(force_bus, int, &sc233hgs_count, 0644);
 
 static int sc233hgs_probe_index;
-static const unsigned short sc233hgs_i2c_list[] = {0x32};
-static const int sc233hgs_bus_map[MAX_SENSOR_DEVICE] = {7, 1, -1, -1, -1, -1};
+static const unsigned short sc233hgs_i2c_list[] = {0x30};
+static const int sc233hgs_bus_map[MAX_SENSOR_DEVICE] = {3, -1, -1, -1, -1, -1};
 
 struct sc233hgs_reg_list {
 	u32 num_of_regs;
@@ -77,6 +77,25 @@ struct sc233hgs_mode {
 
 /* Mode configs */
 static struct sc233hgs_mode supported_modes[] = {
+	{
+		.max_width  = 1920,
+		.max_height = 1080,
+		.width = 1920,
+		.height = 1080,
+		.exp_def = 400,
+		.hts_def = 2382,
+		.vts_def = 1574,
+		.sns_type = V4L2_SMS_SC233HGS_MASTER_MIPI_2M_30FPS_4lane_10BIT,
+		.sns_type_name  = "V4L2_SMS_SC233HGS_MASTER_MIPI_2M_30FPS_4lane_10BIT",
+		.max_fps = {
+			.numerator = 10000,
+			.denominator = 300000,
+		},
+		.reg_list = {
+			.num_of_regs = ARRAY_SIZE(mode_linear_1080p30_4lane_master_regs),
+			.regs = mode_linear_1080p30_4lane_master_regs,
+		},
+	},
 	{
 		.max_width  = 1920,
 		.max_height = 1080,
@@ -637,124 +656,6 @@ error:
 	return ret;
 }
 
-static int sc233hgs_get_info_form_dts(struct sc233hgs *sc233hgs, int index_id) {
-	struct i2c_client *client = v4l2_get_subdevdata(&sc233hgs->sd);
-	struct device_node *np = client->dev.of_node;
-	u32 i, ret, len, num_lanes, num_lanes_swap;
-	u32 lane[LANE_MAX_NUM] = {0}, lane_swap[LANE_MAX_NUM] = {0};
-	u32 mipi_dev, mclk_num, wdr_mode, hs_settle, cif_mode;
-	u32	dphy_enable;
-	const char *type_name;
-	struct property *prop;
-
-	prop = of_find_property(np, "lanes", &len);
-	if (!prop) {
-		dev_err(&client->dev, "not set lanes, using default\n");
-		return -1;
-	}
-
-	num_lanes = len / sizeof(u32);
-
-	ret = of_property_read_u32_array(np, "lanes",
-				lane, num_lanes);
-	if (ret) {
-		dev_err(&client->dev, "failed to to lanes\n");
-		return -1;
-	}
-
-	prop = of_find_property(np, "lanes-swap", &len);
-	if (!prop) {
-		dev_err(&client->dev, "not set lanes-swap, using default\n");
-		return -1;
-	}
-
-	num_lanes_swap = len / sizeof(u32);
-
-	ret = of_property_read_u32_array(np, "lanes-swap",
-				lane_swap, num_lanes_swap);
-	if (ret) {
-		dev_err(&client->dev, "failed to lanes-swap, using default\n");
-		return -1;
-	}
-
-	ret = of_property_read_u32(np, "mipi-dev", &mipi_dev);
-	if (ret) {
-		dev_err(&client->dev, "failed to to mipi-dev, using default\n");
-		return -1;
-	}
-
-	ret = of_property_read_u32(np, "mclk-num", &mclk_num);
-	if (ret) {
-		dev_err(&client->dev, "failed to mclk-num, using default\n");
-		return -1;
-	}
-
-	ret = of_property_read_u32(np, "wdr-mode", &wdr_mode);
-	if (ret) {
-		dev_err(&client->dev, "failed to wdr-mode, using default\n");
-		return -1;
-	}
-
-	ret = of_property_read_u32(np, "hs-settle", &hs_settle);
-	if (ret) {
-		dev_err(&client->dev, "failed to hs-settle, using default\n");
-		return -1;
-	}
-
-	ret = of_property_read_u32(np, "dphy-enable", &dphy_enable);
-	if (ret) {
-		dev_err(&client->dev, "failed to dphy-enable, using default\n");
-		return -1;
-	}
-
-	ret = of_property_read_u32(np, "cif-mode", &cif_mode);
-	if (ret) {
-		dev_err(&client->dev, "failed to cif-mode, using default\n");
-		return -1;
-	}
-
-    ret = of_property_read_string(np, "sns-type", &type_name);
-    if (ret < 0) {
-        dev_err(&client->dev, "Failed to read sns-type property\n");
-        return -1;
-    }
-
-	for (i = 0; i < LANE_MAX_NUM; i++) {
-		sc233hgs_link_cif_menu[index_id][SNS_CFG_TYPE_DATA_LANE0 + i] =
-			i >= num_lanes ? -1 : lane[i];
-		sc233hgs_link_cif_menu[index_id][SNS_CFG_TYPE_PN_SWAP0 + i] =
-			i >= num_lanes_swap ? 0 : lane_swap[i];
-	}
-	sc233hgs_link_cif_menu[index_id][SNS_CFG_TYPE_MIPI_DEV] = mipi_dev;
-	sc233hgs_link_cif_menu[index_id][SNS_CFG_TYPE_MCLK_NUM] = mclk_num;
-	sc233hgs_link_cif_menu[index_id][SNS_CFG_TYPE_WDR_MODE] = wdr_mode;
-	sc233hgs_link_cif_menu[index_id][SNS_CFG_TYPE_DPHY_SETTLE] = hs_settle;
-	sc233hgs_link_cif_menu[index_id][SNS_CFG_TYPE_DPHY_EN] = dphy_enable;
-	sc233hgs_link_cif_menu[index_id][SNS_CFG_TYPE_PHY_MODE] = cif_mode;
-	//type_mode
-	for (i = 0; i < ARRAY_SIZE(supported_modes); i++) {
-		if (!strcmp(type_name, supported_modes[i].sns_type_name)) {
-			sc233hgs->cur_mode = devm_kzalloc(&client->dev,
-						 sizeof(struct sc233hgs_mode), GFP_KERNEL);
-			memcpy(sc233hgs->cur_mode, &supported_modes[i], sizeof(struct sc233hgs_mode));
-		}
-	}
-
-	sc233hgs->power_gpio = devm_gpiod_get(&client->dev,
-			"power", GPIOD_OUT_LOW);
-	if (IS_ERR(sc233hgs->power_gpio))
-		dev_err(&client->dev, "failed to get power-gpios\n");
-	else
-		gpiod_set_value_cansleep(sc233hgs->power_gpio, 1);
-
-	sc233hgs->reset_gpio = devm_gpiod_get(&client->dev,
-			"reset", GPIOD_OUT_HIGH);
-	if (IS_ERR(sc233hgs->reset_gpio))
-		dev_err(&client->dev, "failed to get reset_gpio\n");
-
-	return 0;
-}
-
 static long sc233hgs_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 {
 	struct sc233hgs *sc233hgs = to_sc233hgs(sd);
@@ -892,8 +793,6 @@ static int sc233hgs_init_controls(struct sc233hgs *sc233hgs, int index_id)
 			__func__, ret);
 		return ret;
 	}
-
-	sc233hgs_get_info_form_dts(sc233hgs, index_id);
 
 	mutex_init(&sc233hgs->mutex);
 	ctrl_hdlr->lock = &sc233hgs->mutex;

@@ -77,7 +77,6 @@ struct sop_vi_ctx *g_vi_ctx;
 static struct sop_vi_dev *g_videv;
 struct overflow_info *g_overflow_info;
 static uintptr_t sys_base_address;
-static int mmap_dma_fd;
 
 const char * const clk_sys_name[] = {
 	"clk_sys_0", "clk_sys_1", "clk_sys_2",
@@ -234,7 +233,6 @@ void v4l2_sys_reg_write_mask(uintptr_t address, u32 mask, u32 data)
 #ifdef VI_MEM_BM_ION
 #define MAX_VB2_BUF_NUM 72
 static struct mem_mapping vb2_buf_meminfo[MAX_VB2_BUF_NUM];
-static int vb2_buf_mem_index;
 
 void *v4l2_vb_dma_alloc(struct device *dev, size_t size,
 			dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
@@ -243,16 +241,23 @@ void *v4l2_vb_dma_alloc(struct device *dev, size_t size,
 	struct dma_buf *dmabuf;
 	struct ion_buffer *ionbuf;
 	void *vmap_addr = NULL;
-	int index = 0;
+	int index = -1;
 	struct mem_mapping *mem_info = NULL;
 	char name[16];
 	u8 *owner_name = NULL;
+	int i;
 
 	mutex_lock(&g_videv->v4l2_vb_lock);
-	index = vb2_buf_mem_index++;
 
-	if (index > (MAX_VB2_BUF_NUM - 1)) {
-		vi_pr(VI_ERR, "vb2 buffer requset outof(%d)\n", MAX_VB2_BUF_NUM);
+	for (i = 0; i < MAX_VB2_BUF_NUM; i++) {
+		if (!vb2_buf_meminfo[i].phy_addr) {
+			index = i;
+			break;
+		}
+	}
+
+	if (index < 0) {
+		vi_pr(VI_ERR, "vb2 buffer table full (%d)\n", MAX_VB2_BUF_NUM);
 		mutex_unlock(&g_videv->v4l2_vb_lock);
 		return NULL;
 	}
@@ -269,20 +274,44 @@ void *v4l2_vb_dma_alloc(struct device *dev, size_t size,
 	}
 
 	dmabuf = dma_buf_get(dmabuf_fd);
-	if (!dmabuf) {
-		vi_pr(VI_INFO, "allocated get dmabuf failed\n");
+	if (IS_ERR(dmabuf)) {
+		vi_pr(VI_INFO, "allocated get dmabuf failed, fd=%d ret=%ld\n",
+		      dmabuf_fd, PTR_ERR(dmabuf));
+		/*
+		 * dmabuf isn't obtained; close the fd to avoid leaking it into
+		 * the current process.
+		 */
+		bm_ion_free(dmabuf_fd);
 		mutex_unlock(&g_videv->v4l2_vb_lock);
 		return NULL;
 	}
 
+	/*
+	 * We only need the dma-buf object in kernel. Close the userspace fd
+	 * immediately to avoid lifetime issues when task exits (SIGKILL).
+	 */
+	bm_ion_free(dmabuf_fd);
+	dmabuf_fd = 0;
+
 	ionbuf = (struct ion_buffer *)dmabuf->priv;
 	owner_name = vmalloc(64);
+	if (!owner_name) {
+		vi_pr(VI_INFO, "vmalloc owner_name failed\n");
+		dma_buf_put(dmabuf);
+		mutex_unlock(&g_videv->v4l2_vb_lock);
+		return NULL;
+	}
 	strncpy(owner_name, name, 16);
+	owner_name[63] = '\0';
 	ionbuf->name = owner_name;
 
 	ret = dma_buf_begin_cpu_access(dmabuf, DMA_TO_DEVICE);
 	if (ret < 0) {
 		vi_pr(VI_INFO, "dma_buf_begin_cpu_access failed\n");
+		if (ionbuf->name) {
+			vfree(ionbuf->name);
+			ionbuf->name = NULL;
+		}
 		dma_buf_put(dmabuf);
 		mutex_unlock(&g_videv->v4l2_vb_lock);
 		return NULL;
@@ -291,6 +320,12 @@ void *v4l2_vb_dma_alloc(struct device *dev, size_t size,
 	vmap_addr = ionbuf->vaddr;
 	if (IS_ERR(vmap_addr)) {
 		ret = -EINVAL;
+		dma_buf_end_cpu_access(dmabuf, DMA_TO_DEVICE);
+		if (ionbuf->name) {
+			vfree(ionbuf->name);
+			ionbuf->name = NULL;
+		}
+		dma_buf_put(dmabuf);
 		mutex_unlock(&g_videv->v4l2_vb_lock);
 		return NULL;
 	}
@@ -298,14 +333,18 @@ void *v4l2_vb_dma_alloc(struct device *dev, size_t size,
 	*dma_handle = ionbuf->paddr;
 
 	mem_info->dmabuf = (void *)dmabuf;
-	mem_info->dmabuf_fd = dmabuf_fd;
+	/*
+	 * dmabuf_fd is closed immediately above; do not store any stale fd.
+	 * Export a fresh fd from sop_isp_expbuf() when userspace requests one.
+	 */
+	mem_info->dmabuf_fd = 0;
 	mem_info->vir_addr = vmap_addr;
 	mem_info->phy_addr = ionbuf->paddr;
 	mem_info->fd_pid = current->pid;
 	mem_info->size = size;
 
-	vi_pr(VI_INFO, "dma_fd[%d]:%d alloc size:%ld, phy_addr:0x%llx\n",
-		index, dmabuf_fd, size, *dma_handle);
+	vi_pr(VI_INFO, "vb2_mem[%d] alloc size:%ld, phy_addr:0x%llx\n",
+	      index, size, *dma_handle);
 
 	mutex_unlock(&g_videv->v4l2_vb_lock);
 
@@ -318,7 +357,6 @@ void v4l2_vb_dma_free(struct device *dev, size_t size, void *vaddr,
 	struct mem_mapping *mem_info = NULL;
 	struct dma_buf *dmabuf;
 	struct ion_buffer *ionbuf;
-	int dmabuf_fd;
 	int index = 0;
 	int i;
 
@@ -327,9 +365,7 @@ void v4l2_vb_dma_free(struct device *dev, size_t size, void *vaddr,
 	for (i = 0; i < MAX_VB2_BUF_NUM; i++) {
 		mem_info = &vb2_buf_meminfo[i];
 		if (mem_info->phy_addr == dma_handle) {
-			dmabuf_fd = mem_info->dmabuf_fd;
 			dmabuf = mem_info->dmabuf;
-			ionbuf = (struct ion_buffer *)dmabuf->priv;
 			index = i;
 			break;
 		}
@@ -341,6 +377,14 @@ void v4l2_vb_dma_free(struct device *dev, size_t size, void *vaddr,
 		return;
 	}
 
+	if (!dmabuf) {
+		vi_pr(VI_ERR, "vb2_mem[%d] dmabuf is NULL (0x%llx)\n", index, dma_handle);
+		memset(mem_info, 0, sizeof(struct mem_mapping));
+		mutex_unlock(&g_videv->v4l2_vb_lock);
+		return;
+	}
+
+	ionbuf = (struct ion_buffer *)dmabuf->priv;
 	if (ionbuf->name) {
 		vfree(ionbuf->name);
 		ionbuf->name = NULL;
@@ -349,13 +393,9 @@ void v4l2_vb_dma_free(struct device *dev, size_t size, void *vaddr,
 	dma_buf_end_cpu_access(dmabuf, DMA_TO_DEVICE);
 	dma_buf_put(dmabuf);
 
-	bm_ion_free(mem_info->dmabuf_fd);
-
 	memset(mem_info, 0, sizeof(struct mem_mapping));
 
-	vb2_buf_mem_index--;
-
-	vi_pr(VI_INFO, "g_index:%d, dma_fd[%d]:%d\n", vb2_buf_mem_index, index, dmabuf_fd);
+	vi_pr(VI_INFO, "vb2_mem[%d] freed (0x%llx)\n", index, dma_handle);
 
 	mutex_unlock(&g_videv->v4l2_vb_lock);
 }
@@ -366,17 +406,8 @@ static int v4l2_vb_dma_mmap(struct device *dev, struct vm_area_struct *vma,
 	unsigned long vm_start = vma->vm_start;
 	unsigned int vm_size = vma->vm_end - vma->vm_start;
 	void *pos = phys_to_virt(dma_addr);
-	int i = 0;
-
-	for (i = 0; i < MAX_VB2_BUF_NUM; i++) {
-		if (vb2_buf_meminfo[i].phy_addr == dma_addr) {
-			mmap_dma_fd = vb2_buf_meminfo[i].dmabuf_fd;
-			break;
-		}
-	}
-
-	vi_pr(VI_DBG, "mmap size(%ld) vm_size(%d) phys(0x%llx) attr:%ld dma_fd:%d\n",
-	      size, vm_size, dma_addr, attrs, vb2_buf_meminfo[i].dmabuf_fd);
+	vi_pr(VI_DBG, "mmap size(%ld) vm_size(%d) phys(0x%llx) attr:%ld\n",
+	      size, vm_size, dma_addr, attrs);
 
 	while (vm_size > 0) {
 		if (remap_pfn_range(vma, vm_start, virt_to_pfn(pos), PAGE_SIZE, vma->vm_page_prot))
@@ -432,13 +463,23 @@ static int _vi_dma_alloc(struct sop_vi_dev *vdev,
 	}
 
 	dmabuf = dma_buf_get(dmabuf_fd);
-	if (!dmabuf) {
+	if (IS_ERR(dmabuf)) {
 		vi_pr(VI_INFO, "allocated get dmabuf failed\n");
-		return -ENOMEM;
+		bm_ion_free(dmabuf_fd);
+		return PTR_ERR(dmabuf);
 	}
+
+	/* Close the userspace fd immediately; keep dma-buf ref in kernel. */
+	bm_ion_free(dmabuf_fd);
+	dmabuf_fd = 0;
 
 	ionbuf = (struct ion_buffer *)dmabuf->priv;
 	owner_name = vmalloc(name_size);
+	if (!owner_name) {
+		vi_pr(VI_INFO, "vmalloc owner_name failed\n");
+		dma_buf_put(dmabuf);
+		return -ENOMEM;
+	}
 	if (name)
 		strncpy(owner_name, name, name_size);
 	else
@@ -449,6 +490,10 @@ static int _vi_dma_alloc(struct sop_vi_dev *vdev,
 	ret = dma_buf_begin_cpu_access(dmabuf, DMA_TO_DEVICE);
 	if (ret < 0) {
 		vi_pr(VI_INFO, "dma_buf_begin_cpu_access failed\n");
+		if (ionbuf->name) {
+			vfree(ionbuf->name);
+			ionbuf->name = NULL;
+		}
 		dma_buf_put(dmabuf);
 		return ret;
 	}
@@ -456,13 +501,19 @@ static int _vi_dma_alloc(struct sop_vi_dev *vdev,
 	vmap_addr = ionbuf->vaddr;
 	if (IS_ERR(vmap_addr)) {
 		ret = -EINVAL;
+		dma_buf_end_cpu_access(dmabuf, DMA_TO_DEVICE);
+		if (ionbuf->name) {
+			vfree(ionbuf->name);
+			ionbuf->name = NULL;
+		}
+		dma_buf_put(dmabuf);
 		return ret;
 	}
 
 	*addr_p = ionbuf->paddr;
 
 	mem_info->dmabuf = (void *)dmabuf;
-	mem_info->dmabuf_fd = dmabuf_fd;
+	mem_info->dmabuf_fd = 0;
 	mem_info->vir_addr = vmap_addr;
 	mem_info->phy_addr = ionbuf->paddr;
 	mem_info->fd_pid = current->pid;
@@ -523,8 +574,6 @@ static void _vi_dma_free(struct sop_vi_dev *videv, struct mem_mapping *mem_info)
 
 	dma_buf_end_cpu_access(dmabuf, DMA_TO_DEVICE);
 	dma_buf_put(dmabuf);
-
-	bm_ion_free(mem_info->dmabuf_fd);
 #else
 	if (mem_info->phy_addr && mem_info->size)
 		dma_free_coherent(videv->dev, mem_info->size,
@@ -11028,12 +11077,6 @@ int sop_isp_expbuf(struct file *file, void *priv, struct v4l2_exportbuffer *p)
 	}
 	spin_unlock_irqrestore(&videv->qbuf_lock[raw_num], flags);
 
-	if (mmap_dma_fd) {
-		vi_pr(VI_INFO, "qbuf unmatch, use mmap dmabuf fd:%d\n", mmap_dma_fd);
-		p->fd = mmap_dma_fd;
-		return 0;
-	}
-
 	return -1;
 
 find_fd:
@@ -11042,7 +11085,22 @@ find_fd:
 	for (i = 0; i < MAX_VB2_BUF_NUM; i++) {
 		mem_info = &vb2_buf_meminfo[i];
 		if (mem_info->phy_addr == match_addr) {
-			p->fd = mem_info->dmabuf_fd;
+			struct dma_buf *dmabuf = mem_info->dmabuf;
+
+			if (!dmabuf) {
+				vi_pr(VI_ERR, "expbuf no dmabuf for buf(%d)! (0x%llx)\n",
+				      p->index, match_addr);
+				return -1;
+			}
+
+			/* dma_buf_fd() consumes one reference: take it explicitly. */
+			get_dma_buf(dmabuf);
+			p->fd = dma_buf_fd(dmabuf, O_CLOEXEC);
+			if (p->fd < 0) {
+				dma_buf_put(dmabuf);
+				vi_pr(VI_ERR, "expbuf dma_buf_fd failed, ret=%d\n", p->fd);
+				return -1;
+			}
 			break;
 		}
 	}

@@ -6,9 +6,28 @@ struct imx307_reg {
 	u16 address;
 	u8 val;
 };
-
 #define MAX_SENSOR_DEVICE   6
 #define MAX_I2C_BUS_NUM     7
+
+#if defined(CONFIG_PROJECT_SVPS_NPD_20_V12)
+#define IMX307_S0_MCLK_NUM 0
+#define IMX307_S0_MIPI_DEV 3
+#define IMX307_S0_CIF_PHY_MODE 3
+#define IMX307_S0_LANE_0 8
+#define IMX307_S0_LANE_1 6
+#define IMX307_S0_LANE_2 7
+#define IMX307_S0_LANE_3 10
+#define IMX307_S0_LANE_4 9
+#else
+#define IMX307_S0_MCLK_NUM 1
+#define IMX307_S0_MIPI_DEV 0
+#define IMX307_S0_CIF_PHY_MODE 0
+#define IMX307_S0_LANE_0 2
+#define IMX307_S0_LANE_1 0
+#define IMX307_S0_LANE_2 1
+#define IMX307_S0_LANE_3 3
+#define IMX307_S0_LANE_4 5
+#endif
 
 /* Menu items for LINK_FREQ V4L2 control */
 /* See V4L2_SNS_CFG_TYPE*/
@@ -16,20 +35,20 @@ static s64 imx307_link_cif_menu[MAX_SENSOR_DEVICE][SNS_CFG_TYPE_MAX] = {
 	{// s0 linear mode config
 		SNS_CFG_TYPE_MAX,
 		CAMPLL_FREQ_37P125M,    //1:mclk freq
-		1,                      //2:mclk num
+		IMX307_S0_MCLK_NUM,     //2:mclk num
 		RX_MAC_CLK_900M,        //3:mac clk
 		INPUT_MODE_MIPI,        //4:input mode
 		MIPI_WDR_MODE_NONE,     //5:wdr mode
 		RAW_DATA_12BIT,         //6:data type
-		0,                      //7:mipi_dev
+		IMX307_S0_MIPI_DEV,     //7:mipi_dev
 		1,                      //8:dphy.enable
-		14,                      //9:dphy.hs_settle
-		0,                      //10:cif phy mode
-		2,                      //LANE_0
-		0,                      //LANE_1
-		1,                      //LANE_2
-		3,                      //LANE_3
-		5,                      //LANE_4
+		14,                     //9:dphy.hs_settle
+		IMX307_S0_CIF_PHY_MODE, //10:cif phy mode
+		IMX307_S0_LANE_0,       //LANE_0
+		IMX307_S0_LANE_1,       //LANE_1
+		IMX307_S0_LANE_2,       //LANE_2
+		IMX307_S0_LANE_3,       //LANE_3
+		IMX307_S0_LANE_4,       //LANE_4
 		-1,                     //LANE_5
 		-1,                     //LANE_6
 		-1,                     //LANE_7
@@ -39,6 +58,10 @@ static s64 imx307_link_cif_menu[MAX_SENSOR_DEVICE][SNS_CFG_TYPE_MAX] = {
 		0,                      //SWAP_2
 		0,                      //SWAP_3
 		0,                      //SWAP_4
+		0,                      //SWAP_5
+		0,                      //SWAP_6
+		0,                      //SWAP_7
+		0,                      //SWAP_8
 		0,                      //SWAP_5
 		0,                      //SWAP_6
 		0,                      //SWAP_7
@@ -59,8 +82,8 @@ static s64 imx307_link_cif_menu[MAX_SENSOR_DEVICE][SNS_CFG_TYPE_MAX] = {
 		4,                      //LANE_0
 		5,                      //LANE_1
 		3,                      //LANE_2
-		-1,                      //LANE_3
-		-1,                      //LANE_4
+		-1,                     //LANE_3
+		-1,                     //LANE_4
 		-1,                     //LANE_5
 		-1,                     //LANE_6
 		-1,                     //LANE_7
@@ -118,11 +141,11 @@ static s64 imx307_link_cif_menu[MAX_SENSOR_DEVICE][SNS_CFG_TYPE_MAX] = {
 		0,                      //8:dphy.enable
 		8,                      //9:dphy.hs_settle
 		6,                      //10:cif phy mode
-		10,                      //LANE_0
-		11,                      //LANE_1
+		10,                     //LANE_0
+		11,                     //LANE_1
 		9,                      //LANE_2
-		-1,                      //LANE_3
-		-1,                      //LANE_4
+		-1,                     //LANE_3
+		-1,                     //LANE_4
 		-1,                     //LANE_5
 		-1,                     //LANE_6
 		-1,                     //LANE_7
@@ -149,11 +172,11 @@ static s64 imx307_link_cif_menu[MAX_SENSOR_DEVICE][SNS_CFG_TYPE_MAX] = {
 		0,                      //8:dphy.enable
 		8,                      //9:dphy.hs_settle
 		6,                      //10:cif phy mode
-		14,                      //LANE_0
-		12,                      //LANE_1
-		13,                      //LANE_2
-		-1,                      //LANE_3
-		-1,                      //LANE_4
+		14,                     //LANE_0
+		12,                     //LANE_1
+		13,                     //LANE_2
+		-1,                     //LANE_3
+		-1,                     //LANE_4
 		-1,                     //LANE_5
 		-1,                     //LANE_6
 		-1,                     //LANE_7
@@ -180,11 +203,11 @@ static s64 imx307_link_cif_menu[MAX_SENSOR_DEVICE][SNS_CFG_TYPE_MAX] = {
 		0,                      //8:dphy.enable
 		8,                      //9:dphy.hs_settle
 		6,                      //10:cif phy mode
-		16,                      //LANE_0
-		17,                      //LANE_1
-		15,                      //LANE_2
-		-1,                      //LANE_3
-		-1,                      //LANE_4
+		16,                     //LANE_0
+		17,                     //LANE_1
+		15,                     //LANE_2
+		-1,                     //LANE_3
+		-1,                     //LANE_4
 		-1,                     //LANE_5
 		-1,                     //LANE_6
 		-1,                     //LANE_7
