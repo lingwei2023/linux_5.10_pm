@@ -499,6 +499,12 @@ void ispblk_tnr_rgbmap_chg(struct isp_ctx *ctx, enum sop_isp_raw raw_num, const 
 
 		ispblk_rgbmap_dma_config(ctx, raw_num, dma_id);
 		if (ctx->isp_pipe_cfg[raw_num].is_tile) {
+			fe_id = fe_find_hwid(raw_num + 1);
+			preraw_fe = ctx->phys_regs[fe_id];
+			ISP_WR_BITS(preraw_fe, reg_pre_raw_fe_t, le_rgbmap_grid_number,
+						le_rgbmp_h_grid_size, g_w_bit[raw_num + 1]);
+			ISP_WR_BITS(preraw_fe, reg_pre_raw_fe_t, le_rgbmap_grid_number,
+						le_rgbmp_v_grid_size, g_h_bit[raw_num + 1]);
 			dma_id = rgbmap_dma_find_hwid(raw_num + 1, ISP_RAW_PATH_LE);
 			ispblk_rgbmap_dma_config(ctx, raw_num + 1, dma_id);
 		}
@@ -510,6 +516,12 @@ void ispblk_tnr_rgbmap_chg(struct isp_ctx *ctx, enum sop_isp_raw raw_num, const 
 
 		ispblk_rgbmap_dma_config(ctx, raw_num, dma_id);
 		if (ctx->isp_pipe_cfg[raw_num].is_tile) {
+			fe_id = fe_find_hwid(raw_num + 1);
+			preraw_fe = ctx->phys_regs[fe_id];
+			ISP_WR_BITS(preraw_fe, reg_pre_raw_fe_t, se_rgbmap_grid_number,
+						se_rgbmp_h_grid_size, g_w_bit[raw_num + 1]);
+			ISP_WR_BITS(preraw_fe, reg_pre_raw_fe_t, se_rgbmap_grid_number,
+						se_rgbmp_v_grid_size, g_h_bit[raw_num + 1]);
 			dma_id = rgbmap_dma_find_hwid(raw_num + 1, ISP_RAW_PATH_SE);
 			ispblk_rgbmap_dma_config(ctx, raw_num + 1, dma_id);
 		}

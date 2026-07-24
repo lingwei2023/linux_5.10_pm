@@ -1446,6 +1446,10 @@ void ispblk_tnr_tun_cfg(
 	if (g_w_bit[raw_num] != cfg->rgbmap_w_bit) {
 		g_w_bit[raw_num] = cfg->rgbmap_w_bit;
 		g_h_bit[raw_num] = cfg->rgbmap_h_bit;
+		if (ctx->isp_pipe_cfg[raw_num].is_tile) {
+			g_w_bit[raw_num + 1] = cfg->rgbmap_w_bit;
+			g_h_bit[raw_num + 1] = cfg->rgbmap_h_bit;
+		}
 
 		g_rgbmap_chg_pre[raw_num][0] = true;
 		g_rgbmap_chg_pre[raw_num][1] = true;
