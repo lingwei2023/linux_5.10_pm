@@ -113,12 +113,20 @@ config SENSOR_V4L2_SC020HGS
 	help
 	  Support for Sensor on the CV186X SoC.
 
+
 config SENSOR_V4L2_SC233HGS
 	depends on VIDEO_V4L2 && I2C
 	tristate "sc233hgs support"
 	default n
 	help
 	  Support for Sensor on the CV186X SoC.
+
+config SENSOR_V4L2_GMAX2424
+	depends on VIDEO_V4L2 && I2C
+	tristate "gmax2424 support"
+	default n
+	help
+	  Support for Gpixel GMAX2424 24MP sensor on the CV186X SoC.
 
 config SENSOR_V4L2_SC500AI
 	depends on VIDEO_V4L2 && I2C
