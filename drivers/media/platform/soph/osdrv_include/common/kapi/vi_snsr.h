@@ -4,7 +4,7 @@
 #include <linux/comm_cif.h>
 
 #define MAX_WDR_FRAME_NUM	2
-#define ISP_MAX_SNS_REGS	32
+#define ISP_MAX_SNS_REGS	128
 
 /**
  * struct active_size_s - linear/wdr image information

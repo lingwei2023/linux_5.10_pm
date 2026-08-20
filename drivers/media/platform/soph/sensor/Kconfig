@@ -128,6 +128,13 @@ config SENSOR_V4L2_GMAX2424
 	help
 	  Support for Gpixel GMAX2424 24MP sensor on the CV186X SoC.
 
+config SENSOR_V4L2_SC535HGS
+	depends on VIDEO_V4L2 && I2C
+	tristate "sc535hgs support"
+	default n
+	help
+	  Support for SmartSens SC535HGS 5.35MP global shutter sensor on the CV186X SoC.
+
 config SENSOR_V4L2_SC500AI
 	depends on VIDEO_V4L2 && I2C
 	tristate "sc500ai support"
