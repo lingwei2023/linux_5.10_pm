@@ -25,6 +25,21 @@
 
 #include "uvcvideo.h"
 
+#define CMD_MAGIC 0xEF //定义命令幻数
+#define CMD_MAX_NR 3 //定义最大命令个数
+#define CMD_GET _IOWR(CMD_MAGIC, 1,struct ioctl_data)
+#define CMD_SET _IOW(CMD_MAGIC, 2,struct ioctl_data)
+#define CMD_KBUF _IO(CMD_MAGIC, 3)
+struct ioctl_data{
+	unsigned char bRequestType;
+	unsigned char bRequest;
+	unsigned short wValue;
+	unsigned short wIndex;
+	unsigned short wLength;
+	unsigned char* data;
+	unsigned int timeout;		///< unit:ms
+};
+
 /* ------------------------------------------------------------------------
  * UVC ioctls
  */
@@ -1313,6 +1328,12 @@ static long uvc_ioctl_default(struct file *file, void *fh, bool valid_prio,
 	struct uvc_fh *handle = fh;
 	struct uvc_video_chain *chain = handle->chain;
 
+	struct uvc_streaming *stream = video_drvdata(file);
+	struct usb_device *udev = interface_to_usbdev(stream->intf);
+
+	unsigned char *data;
+	struct ioctl_data *val= (struct ioctl_data *)arg;
+
 	switch (cmd) {
 	/* Dynamic controls. */
 	case UVCIOC_CTRL_MAP:
@@ -1320,7 +1341,45 @@ static long uvc_ioctl_default(struct file *file, void *fh, bool valid_prio,
 
 	case UVCIOC_CTRL_QUERY:
 		return uvc_xu_ctrl_query(chain, arg);
-
+	
+	case CMD_GET:
+		data = kmalloc(val->wLength, GFP_KERNEL);
+		usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
+							  val->bRequest,
+							  val->bRequestType,
+							  val->wValue,
+							  val->wIndex,
+							  data,
+							  val->wLength,
+							  val->timeout);
+	
+		if (copy_to_user(val->data, data, val->wLength))
+		{
+			printk("copy_to_user error\n");
+			kfree(data);
+			return -EFAULT;
+		}
+		kfree(data);
+		return 0;
+	case CMD_SET:
+		data = kmalloc(val->wLength, GFP_KERNEL);
+		if (copy_from_user(data, val->data, val->wLength))
+		{
+			printk("copy_from_user error\n");
+			kfree(data);
+			return -EFAULT;
+		}
+		
+		usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+							  val->bRequest,
+							  val->bRequestType,
+							  val->wValue,
+							  val->wIndex,
+							  data,
+							  val->wLength,
+							  val->timeout);
+		kfree(data);					  
+		return 0;
 	default:
 		return -ENOTTY;
 	}
@@ -1423,6 +1482,11 @@ static long uvc_v4l2_compat_ioctl32(struct file *file,
 	} karg;
 	void __user *up = compat_ptr(arg);
 	long ret;
+	struct uvc_streaming *stream = video_drvdata(file);
+	struct usb_device *udev = interface_to_usbdev(stream->intf);
+
+	unsigned char *data;
+	struct ioctl_data *val= (struct ioctl_data *)arg;
 
 	switch (cmd) {
 	case UVCIOC_CTRL_MAP32:
@@ -1450,6 +1514,44 @@ static long uvc_v4l2_compat_ioctl32(struct file *file,
 			return ret;
 		break;
 
+	case CMD_GET:
+		data = kmalloc(val->wLength, GFP_KERNEL);
+		usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
+							  val->bRequest,
+							  val->bRequestType,
+							  val->wValue,
+							  val->wIndex,
+							  data,
+							  val->wLength,
+							  val->timeout);
+	
+		if (copy_to_user(val->data, data, val->wLength))
+		{
+			printk("copy_to_user error\n");
+			kfree(data);
+			return -EFAULT;
+		}
+		kfree(data);
+		return 0;
+	case CMD_SET:
+		data = kmalloc(val->wLength, GFP_KERNEL);
+		if (copy_from_user(data, val->data, val->wLength))
+		{
+			printk("copy_from_user error\n");
+			kfree(data);
+			return -EFAULT;
+		}
+		
+		usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+							  val->bRequest,
+							  val->bRequestType,
+							  val->wValue,
+							  val->wIndex,
+							  data,
+							  val->wLength,
+							  val->timeout);
+		kfree(data);					  
+		return 0;
 	default:
 		return -ENOIOCTLCMD;
 	}
