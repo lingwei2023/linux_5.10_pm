@@ -29,6 +29,8 @@
 #include <linux/reset.h>
 #include <linux/watchdog.h>
 #include <linux/debugfs.h>
+#include <linux/notifier.h>
+#include <linux/kexec.h>
 
 #define WDOG_CONTROL_REG_OFFSET			0x00
 #define WDOG_CONTROL_REG_WDT_EN_MASK		0x01
@@ -91,6 +93,7 @@ struct dw_wdt {
 	struct dw_wdt_timeout	timeouts[DW_WDT_NUM_TOPS];
 	struct watchdog_device	wdd;
 	struct reset_control	*rst;
+	struct notifier_block	panic_nb;
 	/* Save/restore */
 	u32			control;
 	u32			timeout;
@@ -358,6 +361,27 @@ static int dw_wdt_stop(struct watchdog_device *wdd)
 	reset_control_deassert(dw_wdt->rst);
 
 	return 0;
+}
+
+static int dw_wdt_panic_notifier(struct notifier_block *nb,
+				 unsigned long code, void *unused)
+{
+	struct dw_wdt *dw_wdt = container_of(nb, struct dw_wdt, panic_nb);
+	int crash_loaded = kexec_crash_loaded();
+
+	pr_emerg("dw_wdt: panic notifier entered, crash_loaded=%d\n",
+		 crash_loaded);
+
+	/* Stop the watchdog only when kdump is armed (a crash kernel has been
+	 * loaded); otherwise leave it running so it keeps resetting the SoC on
+	 * a plain panic.
+	 */
+	if (crash_loaded) {
+		pr_emerg("dw_wdt: stopping watchdog (kdump armed)\n");
+		dw_wdt_stop(&dw_wdt->wdd);
+	}
+
+	return NOTIFY_DONE;
 }
 
 static int dw_wdt_restart(struct watchdog_device *wdd,
@@ -731,6 +755,11 @@ static int dw_wdt_drv_probe(struct platform_device *pdev)
 	if (ret)
 		goto out_disable_pclk;
 
+	dw_wdt->panic_nb.notifier_call = dw_wdt_panic_notifier;
+	atomic_notifier_chain_register(&panic_notifier_list,
+				       &dw_wdt->panic_nb);
+	pr_info("dw_wdt: panic notifier registered\n");
+
 	dw_wdt_dbgfs_init(dw_wdt);
 
 	return 0;
@@ -749,6 +778,8 @@ static int dw_wdt_drv_remove(struct platform_device *pdev)
 
 	dw_wdt_dbgfs_clear(dw_wdt);
 
+	atomic_notifier_chain_unregister(&panic_notifier_list,
+					 &dw_wdt->panic_nb);
 	watchdog_unregister_device(&dw_wdt->wdd);
 	reset_control_assert(dw_wdt->rst);
 	clk_disable_unprepare(dw_wdt->pclk);
