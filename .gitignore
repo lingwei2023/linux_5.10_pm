@@ -52,6 +52,7 @@ modules.order
 #
 # Top-level generic files
 #
+/build/
 /tags
 /TAGS
 /linux
