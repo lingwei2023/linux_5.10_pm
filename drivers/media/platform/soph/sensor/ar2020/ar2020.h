@@ -49,8 +49,45 @@ static  s64 ar2020_link_cif_menu[MAX_SENSOR_DEVICE][SNS_CFG_TYPE_MAX] = {
 };
 
 static const struct ar2020_reg mode_5120x3840_regs[] = {
+	// ========================================================================
+	// Mode switch reset sequence (fixes EDR -> Normal mode register leftovers)
+	//
+	// Background:
+	//   1) When switching from eDR slave mode to normal linear mode,
+	//      the sensor retains eDR-specific register states.
+	//      A global soft reset via 0x301A=0x01FF is mandatory to clear
+	//      all module state; otherwise the PLL cannot re-lock, HDR mode
+	//      stays enabled, and eDR READ_MODE persists, all of which
+	//      cause no-output or corrupted-image issues.
+	//   2) The asymmetry (EDR->Normal requires reset, Normal->EDR does not)
+	//      exists because the eDR sequence already begins with its own
+	//      {0x3140, 0x0000} + {0x301A, 0x01FF} reset block.
+	//   3) TRIGGER_MODE is disabled first to avoid external triggers
+	//      interfering with the soft-reset flow.
+	// ========================================================================
+	{0x3140, 0x0000},     // TRIGGER_MODE: disable trigger before reset
+	{0xFFFF, 0x0064},     // DELAY 100us: wait for trigger logic to quiesce
+	{0x301A, 0x01FF},     // RESET_REGISTER: GLOBAL soft reset all modules (CRITICAL)
+	{0xFFFF, 0x0032},     // DELAY 50us: wait for reset propagation
+
+	// ========================================================================
+	// Explicit clear of critical eDR-only registers
+	// (double-insurance after soft reset — some registers may survive reset)
+	// ========================================================================
+	{0x0220, 0x00, 1},    // HDR_MODE=0  disable HDR/eDR output (MOST CRITICAL)
+	{0x3040, 0x0000},     // READ_MODE=0  exit eDR dual-sample read mode
+	{0x3042, 0x0000},     // clear anti-smear register (eDR only non-zero)
+	{0x0105, 0x00, 1},    // disable bad-frame mask (eDR turns it on)
+	{0x3098, 0x0000},     // MODULE_ODP_FORCE_CLK=0  release forced clocks
+	{0x31D2, 0x0000},     // HDR_SC_GAIN_RATIO  clear HDR synthesis param
+	{0x31D4, 0x0000},     // HDR_SC_SCALE        clear HDR synthesis param
+	{0x31D6, 0x0000},     // HDR_SC_THRESHOLD_1A clear HDR synthesis param
+	{0x31DA, 0x0000},     // HDR_SC_THRESHOLD_2A clear HDR synthesis param
+	{0x3336, 0x0000},     // clear trigger-timing lock (eDR sets 0x0030)
+	{0x0008, 0x0000},     // DATA_PEDESTAL clear (eDR uses 0x00A8)
+
 	{0x44D6, 0xF206},
-	{0x0100, 0x0000},
+	{0x0100, 0x00, 1},
 	{0x0304, 0x0002},
 	{0x0306, 0x0067},
 	{0x0300, 0x0006},
@@ -780,10 +817,31 @@ static const struct ar2020_reg mode_5120x3840_regs[] = {
 	{0x3060, 0xFF01},
 	{0x3340, 0x0C60},
 	{0x3340, 0x1C60},
-	{0x0100, 0x0100},
+	/*
+	 * SDR 模式末尾配置块 - 2026-08-03 调整
+	 *
+	 * 修改背景：
+	 *   1) sensor 装配方向旋转 180 度，需要 mirror+flip (0x0101=0x03) 修复
+	 *   2) 0x0101 必须在 0x0100 (stream on) 之后写入，否则 sensor 锁存默认值 0x00
+	 *   3) 0x0100 必须用 8 位写，16 位写 0x0100=0x0100 会触发 I2C auto-increment
+	 *      把 0x0101 清零（与 eDR 模式末尾对比）
+	 *   4) trigger 模式从 eDR 模式末尾搬过来，配置 GPI 输入 + 0x3140=0x0001 使能
+	 */
+	{0x0100, 0x01, 1},
+	{0x0101, 0x03, 1},
+
+	// 最后配置从机模式
+	//{0x301A, 0x0108}, // RESET_REGISTER
+	//{0x30C0, 0xFD73}, // GPI_STATUS
+	//{0x30C4, 0x0233}, // GPIO_CTRL
+	//{0x3140, 0x0001}, // TRIGGER_MODE
+
 	{0x44D6, 0xB206},
 	{0x3062, 0x000C},
 	{0x0202, 0x0F1D},
+
+	// 最后延时（参考 eDR 模式，等待 trigger 配置生效）
+	{0xFFFF, 0x0032},
 };
 
 // 序列中8bit/16bit分开写
@@ -1525,13 +1583,13 @@ static const struct ar2020_reg mode_5120x3840_edr_slave_regs[] = {
 
 	// 先启动传感器（关键顺序）
 	{0x0100, 0x01, 1}, // MODE_SELECT		modify
-	{0x0101, 0x02, 1}, // 0:normal,1:flip,2:mirror,3:flip+mirror
+	{0x0101, 0x03, 1}, // 0:normal,1:flip,2:mirror,3:flip+mirror
 
 	// 最后配置从机模式（关键顺序）
 	{0x301A, 0x0108}, // RESET_REGISTER
-	//{0x30C0, 0xFD73}, // GPI_STATUS
-	//{0x30C4, 0x0233}, // GPIO_CTRL
-	//{0x3140, 0x0001}, // TRIGGER_MODE
+	{0x30C0, 0xFD73}, // GPI_STATUS
+	{0x30C4, 0x0233}, // GPIO_CTRL
+	{0x3140, 0x0001}, // TRIGGER_MODE
 
 	// 最后延时
 	{0xFFFF, 0x0032},

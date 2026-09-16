@@ -46,7 +46,7 @@
 
 static const enum mipi_wdr_mode_e ar2020_wdr_mode = MIPI_WDR_MODE_NONE;
 
-volatile int ar2020_count;
+static int ar2020_count;
 static int force_bus[MAX_SENSOR_DEVICE] = {[0 ... (MAX_SENSOR_DEVICE - 1)] = -1};
 module_param_array(force_bus, int, &ar2020_count, 0644);
 
@@ -90,8 +90,8 @@ static struct ar2020_mode supported_modes[] = {
 			.denominator = 200000,
 		},
 		.reg_list = {
-			.num_of_regs = ARRAY_SIZE(mode_5120x3840_edr_slave_regs),
-			.regs = mode_5120x3840_edr_slave_regs,
+			.num_of_regs = ARRAY_SIZE(mode_5120x3840_regs),
+			.regs = mode_5120x3840_regs,
 		},
 	}
 };
@@ -441,10 +441,15 @@ static int set_stream(struct v4l2_subdev *sd, int enable)
 		}
 
 		if (!IS_ERR(ar2020->reset_gpio)) {
+			dev_info(&client->dev,
+				 "sensor hw reset: XSHUTDOWN low 100ms then release\n");
 			gpiod_set_value_cansleep(ar2020->reset_gpio, 0);
 			msleep(100);
 			gpiod_set_value_cansleep(ar2020->reset_gpio, 1);
 			msleep(100);
+		} else {
+			dev_warn(&client->dev,
+				 "reset_gpio unavailable, skip sensor hw reset\n");
 		}
 
 		/*
@@ -589,6 +594,27 @@ static int ar2020_get_info_form_dts(struct ar2020 *ar2020, int index_id)
 	const char *type_name;
 	struct property *prop;
 
+	/*
+	 * Request power/reset GPIOs FIRST, before any DTS property parsing.
+	 * The property parsing below may return early (e.g. missing "lanes"),
+	 * which previously skipped the GPIO requests entirely and left
+	 * reset_gpio as NULL: the STREAMON hardware reset then became a
+	 * silent no-op (gpiod API ignores NULL desc) and the sensor could
+	 * never recover from a wedged trigger state machine without a full
+	 * power cycle. GPIO 293 (portg 5, XSHUTDOWN, active high release).
+	 */
+	ar2020->power_gpio = devm_gpiod_get(&client->dev,
+			"power", GPIOD_OUT_LOW);
+	if (IS_ERR(ar2020->power_gpio))
+		dev_err(&client->dev, "failed to get power-gpios\n");
+	else
+		gpiod_set_value_cansleep(ar2020->power_gpio, 1);
+
+	ar2020->reset_gpio = devm_gpiod_get(&client->dev,
+			"reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(ar2020->reset_gpio))
+		dev_err(&client->dev, "failed to get reset_gpio\n");
+
 	prop = of_find_property(np, "lanes", &len);
 	if (!prop) {
 		dev_err(&client->dev, "not set lanes, using default\n");
@@ -681,18 +707,6 @@ static int ar2020_get_info_form_dts(struct ar2020 *ar2020, int index_id)
 			memcpy(ar2020->cur_mode, &supported_modes[i], sizeof(struct ar2020_mode));
 		}
 	}
-
-	ar2020->power_gpio = devm_gpiod_get(&client->dev,
-			"power", GPIOD_OUT_LOW);
-	if (IS_ERR(ar2020->power_gpio))
-		dev_err(&client->dev, "failed to get power-gpios\n");
-	else
-		gpiod_set_value_cansleep(ar2020->power_gpio, 1);
-
-	ar2020->reset_gpio = devm_gpiod_get(&client->dev,
-			"reset", GPIOD_OUT_HIGH);
-	if (IS_ERR(ar2020->reset_gpio))
-		dev_err(&client->dev, "failed to get reset_gpio\n");
 
 	return 0;
 }
@@ -1144,7 +1158,7 @@ static struct i2c_driver ar2020_i2c_driver = {
 
 static int __init sensor_mod_init(void)
 {
-	const char *driver_version = "v1.0.2";
+	const char *driver_version = "v1.0.3_sdr";
 	pr_info("== [%s] ar2020 mod add  ==\n", driver_version);
 
 	return i2c_add_driver(&ar2020_i2c_driver);
