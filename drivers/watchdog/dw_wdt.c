@@ -94,6 +94,7 @@ struct dw_wdt {
 	struct watchdog_device	wdd;
 	struct reset_control	*rst;
 	struct notifier_block	panic_nb;
+	void __iomem		*rtc_ctrl;	/* RTC ctrl domain (0x05025000) for panic warm reset */
 	/* Save/restore */
 	u32			control;
 	u32			timeout;
@@ -372,13 +373,21 @@ static int dw_wdt_panic_notifier(struct notifier_block *nb,
 	pr_emerg("dw_wdt: panic notifier entered, crash_loaded=%d\n",
 		 crash_loaded);
 
-	/* Stop the watchdog only when kdump is armed (a crash kernel has been
-	 * loaded); otherwise leave it running so it keeps resetting the SoC on
-	 * a plain panic.
-	 */
 	if (crash_loaded) {
 		pr_emerg("dw_wdt: stopping watchdog (kdump armed)\n");
 		dw_wdt_stop(&dw_wdt->wdd);
+	} else {
+		/* Plain panic: request warm reset (req_warm_rst) instead of waiting
+		 * for the watchdog, so ST_ON_REASON records REQ_WARM_RST[10] and a
+		 * panic-triggered reset is told apart from a normal reboot
+		 * (REQ_PWR_CYC[8]) and a real watchdog timeout (REQ_WDG_RST[11]).
+		 */
+		pr_emerg("dw_wdt: requesting warm reset (panic)\n");
+		mdelay(1000);	/* drain serial console before resetting */
+		if (dw_wdt->rtc_ctrl) {
+			writel(0xAB18, dw_wdt->rtc_ctrl + 0x4);	/* RTC_CTRL0_UNLOCKKEY */
+			writel(0xFFFF0810, dw_wdt->rtc_ctrl + 0x8);	/* req_warm_rst = bit4 */
+		}
 	}
 
 	return NOTIFY_DONE;
@@ -755,6 +764,10 @@ static int dw_wdt_drv_probe(struct platform_device *pdev)
 	if (ret)
 		goto out_disable_pclk;
 
+	dw_wdt->rtc_ctrl = ioremap(0x05025000, 0x1000);
+	if (!dw_wdt->rtc_ctrl)
+		pr_warn("dw_wdt: failed to map RTC ctrl for panic warm reset\n");
+
 	dw_wdt->panic_nb.notifier_call = dw_wdt_panic_notifier;
 	atomic_notifier_chain_register(&panic_notifier_list,
 				       &dw_wdt->panic_nb);
@@ -780,6 +793,8 @@ static int dw_wdt_drv_remove(struct platform_device *pdev)
 
 	atomic_notifier_chain_unregister(&panic_notifier_list,
 					 &dw_wdt->panic_nb);
+	if (dw_wdt->rtc_ctrl)
+		iounmap(dw_wdt->rtc_ctrl);
 	watchdog_unregister_device(&dw_wdt->wdd);
 	reset_control_assert(dw_wdt->rst);
 	clk_disable_unprepare(dw_wdt->pclk);
