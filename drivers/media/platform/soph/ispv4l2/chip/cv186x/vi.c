@@ -732,6 +732,9 @@ int vi_get_pipe_frame(struct sop_vi_dev *videv, int vi_pipe,
 	dev_frm_w = ctx->isp_pipe_cfg[raw_num].crop.w;
 	dev_frm_h = ctx->isp_pipe_cfg[raw_num].crop.h;
 
+	if (ctx->isp_pipe_cfg[raw_num].is_tile)
+		dev_frm_w += ctx->isp_pipe_cfg[raw_num + 1].crop.w;   // tile: 左+右 tile = 全宽
+
 	memset(&rawdump_crop, 0, sizeof(rawdump_crop));
 	if ((frame_info[0].video_frame.offset_top != 0) ||
 		(frame_info[0].video_frame.offset_bottom != 0) ||
